@@ -1,4 +1,4 @@
-from config import API_KEY, BASE_URL, MODEL
+﻿from config import API_KEY, BASE_URL, MODEL
 from openai import OpenAI
 from mcp.server.fastmcp import FastMCP
 from server import SESSION
@@ -47,6 +47,9 @@ def ai_sampling_loop_with_session(session: Any) -> str:
     from openai.types.chat import (ChatCompletionSystemMessageParam,
                                    ChatCompletionUserMessageParam,
                                    ChatCompletionToolMessageParam)
+
+    stack = get_call_stack(session)          # ← 补跑 kv
+    lm = get_module_by_address(session, "ntkrnlmp")  # ← 补跑 lm（任意地址）
 
     messages: List[Any] = [
         ChatCompletionSystemMessageParam(
