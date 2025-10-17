@@ -1,14 +1,19 @@
-﻿# ai_agent.py  第2轮一次性修复版
+﻿# ai_agent.py  第3轮-无新信息兜底版
 from config import API_KEY, BASE_URL, MODEL
 from openai import OpenAI
 from openai.types.chat import ChatCompletionToolMessageParam
-import json, re
+import json, re, hashlib
 from typing import Any
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 # ---------- 0. 全局去重表 ----------
 _executed = set()
+
+# ---------- 0.1 兜底逻辑 ----------
+_prev_output_hash = None
+_no_new_info_count = 0
+MAX_NO_NEW_INFO = 3          # 连续3轮无新信息就兜底
 
 # ---------- 1. 重型命令池 ----------
 HEAVY_CMDS = {".bugreport", "!devnode", "!drvobj", "!poaction", "!vm"}
@@ -82,16 +87,26 @@ def ai_sampling_loop_with_session(session: Any) -> str:
          "content": json.dumps({"status": "success", "output": init_output}, ensure_ascii=False)}
     ]
 
+    global _prev_output_hash, _no_new_info_count
+
     while True:
         resp = client.chat.completions.create(model=MODEL, messages=messages, tools=tools, tool_choice="auto")
         assistant_msg = resp.choices[0].message
 
+        # 如果 AI 已输出结论，直接返回
         if assistant_msg.content and "【结论】" in assistant_msg.content:
             return "\033[92m" + assistant_msg.content + "\033[0m"
 
+        # 无工具调用 → 强制兜底结论
         if not assistant_msg.tool_calls:
-            return assistant_msg.content or "无内容返回"
+            messages.append({
+                "role": "user",
+                "content": "请基于以上所有信息，立即生成中文蓝屏分析报告，以“【结论】”开头。"
+            })
+            resp = client.chat.completions.create(model=MODEL, messages=messages, tools=tools, tool_choice="none")
+            return "\033[92m" + (resp.choices[0].message.content or "无内容返回") + "\033[0m"
 
+        # 正常工具调用流程
         messages.append({
             "role": assistant_msg.role,
             "content": assistant_msg.content or "",
@@ -101,11 +116,30 @@ def ai_sampling_loop_with_session(session: Any) -> str:
                 for tc in assistant_msg.tool_calls
             ]
         })
+
+        # 收集本轮全部输出，用于去重判断
+        round_outputs = []
         for tc in assistant_msg.tool_calls:
             cmd = json.loads(tc.function.arguments)["command"]
             output = _send_command_dedup(session, cmd)
+            round_outputs.append(output)
             messages.append(ChatCompletionToolMessageParam(
                 tool_call_id=tc.id,
                 role="tool",
                 content=json.dumps({"status": "success", "output": output}, ensure_ascii=False)
             ))
+
+        # 无新信息兜底判断
+        round_hash = hashlib.md5("".join(round_outputs).encode()).hexdigest()
+        if round_hash == _prev_output_hash:
+            _no_new_info_count += 1
+            if _no_new_info_count >= MAX_NO_NEW_INFO:
+                messages.append({
+                    "role": "user",
+                    "content": "连续多轮未获取新信息，请基于已有信息立即生成中文蓝屏分析报告，以“【结论】”开头。"
+                })
+                resp = client.chat.completions.create(model=MODEL, messages=messages, tools=tools, tool_choice="none")
+                return "\033[92m" + (resp.choices[0].message.content or "无内容返回") + "\033[0m"
+        else:
+            _no_new_info_count = 0
+        _prev_output_hash = round_hash
