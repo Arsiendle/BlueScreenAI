@@ -1,4 +1,4 @@
-﻿# ai_agent.py  一次性修复版
+﻿# ai_agent.py  第2轮一次性修复版
 from config import API_KEY, BASE_URL, MODEL
 from openai import OpenAI
 from openai.types.chat import ChatCompletionToolMessageParam
@@ -7,10 +7,18 @@ from typing import Any
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# ---------- 1. 全局去重表 ----------
+# ---------- 0. 全局去重表 ----------
 _executed = set()
 
-# ---------- 2. 折叠 STACK_TEXT 到最近 5 行 ----------
+# ---------- 1. 重型命令池 ----------
+HEAVY_CMDS = {".bugreport", "!devnode", "!drvobj", "!poaction", "!vm"}
+
+# ---------- 2. 称重函数 ----------
+def _dump_level(session: Any) -> str:
+    raw = session.send_command("vertarget", timeout=10.0)
+    return "full" if raw.count("\n") > 200 else "triage"
+
+# ---------- 3. 折叠 STACK_TEXT ----------
 def _collapse_stack(text: str) -> str:
     return re.sub(
         r"(?s)(STACK_TEXT:.*?)(?=^\s*$|\Z)",
@@ -19,19 +27,23 @@ def _collapse_stack(text: str) -> str:
         flags=re.MULTILINE
     )
 
-# ---------- 3. 去重执行 ----------
+# ---------- 4. 去重 + 动态过滤 ----------
 def _send_command_dedup(session: Any, cmd: str) -> str:
-    # 用命令主干做 key，防止 .symfix; .reload 重复
     key = re.sub(r'\s+', ' ', cmd.split(';')[0].strip().lower())
     if key in _executed:
         return f"[已执行过，跳过: {cmd}]"
     _executed.add(key)
-    # 符号下载超时放大
-    timeout = 120.0 if key == '.reload' else 30.0
+
+    if not hasattr(session, "_dump_level"):
+        session._dump_level = _dump_level(session)
+    if session._dump_level == "triage" and key in HEAVY_CMDS:
+        return f"[当前为内核小转储，命令 '{cmd}' 不可用]"
+
+    timeout = 120.0 if key == ".reload" else 30.0
     raw = session.send_command(cmd, timeout=timeout)
-    # 统一折叠
     return _collapse_stack(raw)
 
+# ---------- 5. 主循环 ----------
 def ai_sampling_loop_with_session(session: Any) -> str:
     tools = [{
         "type": "function",
@@ -49,7 +61,6 @@ def ai_sampling_loop_with_session(session: Any) -> str:
     init_output = session.send_command("!analyze -v", timeout=60.0)
     init_output = _collapse_stack(init_output)
 
-    # 若符号错误，先修复再重跑
     if "WRONG_SYMBOLS" in init_output:
         session.send_command(".symfix", timeout=30.0)
         session.send_command(".reload", timeout=120.0)
