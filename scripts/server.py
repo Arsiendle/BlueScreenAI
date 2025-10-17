@@ -1,15 +1,57 @@
-from fastmcp import FastMCP
+﻿from fastmcp import FastMCP
+from queue import Queue, Empty
 import subprocess
 import threading
 import time
-from queue import Queue, Empty
 from ai_report import generate_report
+import os
 
 mcp = FastMCP("WinDbg MCP Server")
-CDB_PATH = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
-# CDB_PATH = r"WinDbg\cdb.exe"
+# CDB_PATH = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+# 放在文件头部，CDB_PATH 下方
+CDB_PATH = r"WinDbg\cdb.exe"
+SYMBOL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'symbols')
+os.makedirs(SYMBOL_DIR, exist_ok=True)   # 自动创建
 
 class CdbSession:
+    def _read_output(self):
+        for line in self.proc.stdout:
+            self.output_queue.put(line)
+
+    def send_command(self, cmd: str, timeout: float = 30.0) -> str:
+        print(f"--> SEND: {cmd!r}")
+        self.proc.stdin.write(cmd + '\n')
+        self.proc.stdin.flush()
+
+        lines = []
+        start = time.time()
+
+        while True:
+            try:
+                line = self.output_queue.get(timeout=1.0)
+                lines.append(line)
+                print(f"    LINE: {line.rstrip()!r}")
+
+                if 'Followup:' in line:
+                    break
+                if time.time() - start > timeout:
+                    lines.append('[Timeout]\n')
+                    break
+            except Empty:
+                continue
+
+        raw = ''.join(lines)
+        print(f"<-- RECV: {raw!r}")
+        return raw
+
+    def shutdown(self):
+        # 静默退出，不打印卸载日志
+        self.proc.stdin.write('q\n')
+        self.proc.stdin.flush()
+        time.sleep(1)  # 给 1 秒退出
+        self.proc.terminate()
+        self.proc.wait()
+
     def __init__(self, dump_path: str):
         self.proc = subprocess.Popen(
             [CDB_PATH, '-z', dump_path],
@@ -27,39 +69,21 @@ class CdbSession:
         self._reader_thread.start()
 
         time.sleep(1)
-        self.send_command('.symfix')
-        self.send_command('.reload')
-
-    def _read_output(self):
-        for line in self.proc.stdout:
-            self.output_queue.put(line)
-
-    def send_command(self, cmd: str, timeout: float = 5.0) -> str:
-        self.proc.stdin.write(cmd + '\n')
+        # # 只设路径，不等提示符
+        # self.proc.stdin.write('.symfix\n')
+        # self.proc.stdin.flush()
+        # time.sleep(2)  # 给 2 秒生效
+        # # 直接返回，不等 kd>
+        # 只设本地缓存，不等提示符
+        self.proc.stdin.write(f'.sympath cache*{SYMBOL_DIR}\n')
         self.proc.stdin.flush()
+        time.sleep(2)        # 给 2 秒生效
+        # 不再发 .reload /f，让 !analyze -v 自己按需拉符号
 
-        lines = []
-        start = time.time()
-        while True:
-            try:
-                line = self.output_queue.get(timeout=0.5)
-                lines.append(line)
-                if line.strip().endswith('kd>'):
-                    break
-                if time.time() - start > timeout:
-                    lines.append('[Timeout]\n')
-                    break
-            except Empty:
-                break
-        return ''.join(lines)
-
-    def shutdown(self):
-        self.send_command('q')
-        self.proc.terminate()
-        self.proc.wait()
-
+# ---------- 全局会话 ----------
 SESSION = None
 
+# ---------- MCP 工具 ----------
 @mcp.tool()
 def init_dump_session(dump_path: str):
     global SESSION
@@ -93,6 +117,7 @@ def shutdown_session():
 
 @mcp.tool()
 def generate_ai_report() -> dict:
+    global SESSION
     if not SESSION:
         return {"status": "error", "message": "No session"}
     try:
