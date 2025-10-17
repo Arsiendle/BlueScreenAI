@@ -3,6 +3,7 @@ from queue import Queue, Empty
 import subprocess
 import threading
 import time
+import re
 from ai_report import generate_report
 
 mcp = FastMCP("WinDbg MCP Server")
@@ -21,20 +22,27 @@ class CdbSession:
         print(f"--> SEND: {cmd!r}")
         self.proc.stdin.write(cmd + '\n')
         self.proc.stdin.flush()
-        lines = []
-        start = time.time()
+
+        lines, start = [], time.time()
         while True:
             try:
                 line = self.output_queue.get(timeout=1.0)
                 lines.append(line)
                 print(f"    LINE: {line.rstrip()!r}")
-                if 'Followup:' in line:
+
+                # 核心：一旦出现“任意提示符”就停
+                if re.search(r'^\d+:\s*kd>', line.strip()):
                     break
+
                 if time.time() - start > timeout:
                     lines.append('[Timeout]\n')
                     break
             except Empty:
-                continue
+                # 1 秒没数据也继续，但总时长超 timeout 就 break
+                if time.time() - start > timeout:
+                    lines.append('[Timeout]\n')
+                    break
+
         raw = ''.join(lines)
         print(f"<-- RECV: {raw!r}")
         return raw

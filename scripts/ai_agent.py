@@ -1,86 +1,73 @@
 ﻿from config import API_KEY, BASE_URL, MODEL
 from openai import OpenAI
-from mcp.server.fastmcp import FastMCP
-from server import SESSION
+from openai.types.chat import ChatCompletionToolMessageParam
 import json
-import re
 from typing import Any
 
-mcp = FastMCP("AI BlueScreen Agent")
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# ---------- 工具 ----------
-def get_blue_screen_summary(session: Any) -> dict:
-    if not session:
-        return {"status": "error", "message": "No session"}
-    out = session.send_command("!analyze -v", timeout=30.0)
-
-    # ✅ 提炼关键字段
-    bug = re.search(r'BUGCHECK_CODE:\s+([a-fA-F0-9]+)', out)
-    prob = re.search(r'IMAGE_NAME:\s+(\S+)', out)
-    err = re.search(r'ERROR_CODE:.*(0x[0-9a-fA-F]+)', out)
-    disk = re.search(r'DISK_HARDWARE_ERROR:.*(There was error with disk hardware)', out)
-
-    return {
-        "status": "success",
-        "bugcheck_code": bug.group(1) if bug else None,
-        "probably_caused": prob.group(1).strip() if prob else None,
-        "error_code": err.group(1) if err else None,
-        "disk_error": disk.group(1) if disk else None,
-        "raw": out[:2000],
-    }
-
-def get_call_stack(session: Any) -> dict:
-    if not session:
-        return {"status": "error", "message": "No session"}
-    out = session.send_command("kv", timeout=10.0)
-    return {"status": "success", "stack": "\n".join(out.splitlines()[:20])}
-
-def get_module_by_address(session: Any, address: str) -> dict:
-    if not session:
-        return {"status": "error", "message": "No session"}
-    out = session.send_command(f"lm a {address}", timeout=10.0)
-    m = re.search(r"([a-fA-F0-9`]+)\s+([a-fA-F0-9`]+)\s+(\S+)", out)
-    if m:
-        start, end, name = m.groups()
-        detail = session.send_command(f"!lmi {name}", timeout=10.0)
-        path = re.search(r"Image path:\s+(.+?)\r", detail)
-        ver = re.search(r"Image version:\s+(.+?)\r", detail)
-        ts = re.search(r"Date stamp:\s+(.+?)\r", detail)
-        return {
-            "status": "success",
-            "name": name,
-            "start": start,
-            "end": end,
-            "image_path": path.group(1) if path else None,
-            "image_version": ver.group(1) if ver else None,
-            "time_stamp": ts.group(1) if ts else None,
-            "detail": detail[:800],
-        }
-    return {"status": "error", "message": "Module not found"}
-
-# ---------- AI 采样 ----------
 def ai_sampling_loop_with_session(session: Any) -> str:
-    from openai.types.chat import (ChatCompletionSystemMessageParam,
-                                   ChatCompletionUserMessageParam,
-                                   ChatCompletionToolMessageParam)
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "run_windbg_command",
+            "description": "向 WinDbg 发送任意命令并返回输出",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }
+        }
+    }]
 
-    summary = get_blue_screen_summary(session)
-
+    init_output = session.send_command("!analyze -v", timeout=60.0)
     messages = [
-        ChatCompletionSystemMessageParam(
-            role="system", content="你是 Windows 蓝屏根因分析专家。请根据以下信息输出一份**中文**蓝屏分析报告，包含：错误代码、责任模块、错误含义、用户处理建议。"
-        ),
-        ChatCompletionUserMessageParam(
-            role="user", content=json.dumps(summary, ensure_ascii=False)
-        ),
+        {"role": "system", "content": (
+            "你是 WinDbg 专家。可根据 dump 信息随时调用工具补充数据，"
+            "直到确定蓝屏根因，最后必须输出中文报告并以“【结论】”开头。"
+        )},
+        {"role": "user", "content": "请开始分析"},
+        {"role": "assistant", "tool_calls": [{
+            "id": "init_call",
+            "type": "function",
+            "function": {"name": "run_windbg_command", "arguments": json.dumps({"command": "!analyze -v"})}
+        }]},
+        {"role": "tool", "tool_call_id": "init_call",
+         "content": json.dumps({"status": "success", "output": init_output}, ensure_ascii=False)}
     ]
 
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        tools=[],
-        tool_choice="none"
-    )
+    while True:
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto"          # ① 不强制
+        )
+        assistant_msg = resp.choices[0].message
 
-    return resp.choices[0].message.content or "无内容返回"
+        # ② AI 主动说停 → 立即返回
+        if assistant_msg.content and "【结论】" in assistant_msg.content:
+            return assistant_msg.content
+
+        # ③ 无工具调用也停（兜底）
+        if not assistant_msg.tool_calls:
+            return assistant_msg.content or "无内容返回"
+
+        # ④ 继续执行工具调用
+        messages.append({
+            "role": assistant_msg.role,
+            "content": assistant_msg.content or "",
+            "tool_calls": [
+                {"id": tc.id, "type": tc.type,
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in assistant_msg.tool_calls
+            ]
+        })
+        for tc in assistant_msg.tool_calls:
+            cmd = json.loads(tc.function.arguments)["command"]
+            output = session.send_command(cmd, timeout=30.0)
+            messages.append(ChatCompletionToolMessageParam(
+                tool_call_id=tc.id,
+                role="tool",
+                content=json.dumps({"status": "success", "output": output}, ensure_ascii=False)
+        ))
