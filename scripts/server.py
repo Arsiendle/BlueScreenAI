@@ -4,14 +4,13 @@ import subprocess
 import threading
 import time
 from ai_report import generate_report
-import os
 
 mcp = FastMCP("WinDbg MCP Server")
-# CDB_PATH = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
-# 放在文件头部，CDB_PATH 下方
-CDB_PATH = r"WinDbg\cdb.exe"
-SYMBOL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'symbols')
-os.makedirs(SYMBOL_DIR, exist_ok=True)   # 自动创建
+CDB_PATH = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+# 国内镜像符号服务器
+SYMPATH = r'srv*https://msdl.microsoft.com/download/symbols'
+# 若国内镜像可用，可替换为：
+# SYMPATH = r'srv*https://mirrors.tuna.tsinghua.edu.cn/windows/msdl/download/symbols'
 
 class CdbSession:
     def _read_output(self):
@@ -22,16 +21,13 @@ class CdbSession:
         print(f"--> SEND: {cmd!r}")
         self.proc.stdin.write(cmd + '\n')
         self.proc.stdin.flush()
-
         lines = []
         start = time.time()
-
         while True:
             try:
                 line = self.output_queue.get(timeout=1.0)
                 lines.append(line)
                 print(f"    LINE: {line.rstrip()!r}")
-
                 if 'Followup:' in line:
                     break
                 if time.time() - start > timeout:
@@ -39,16 +35,14 @@ class CdbSession:
                     break
             except Empty:
                 continue
-
         raw = ''.join(lines)
         print(f"<-- RECV: {raw!r}")
         return raw
 
     def shutdown(self):
-        # 静默退出，不打印卸载日志
         self.proc.stdin.write('q\n')
         self.proc.stdin.flush()
-        time.sleep(1)  # 给 1 秒退出
+        time.sleep(1)
         self.proc.terminate()
         self.proc.wait()
 
@@ -63,27 +57,16 @@ class CdbSession:
         )
         assert self.proc.stdin is not None
         assert self.proc.stdout is not None
-
         self.output_queue = Queue()
         self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
         self._reader_thread.start()
-
         time.sleep(1)
-        # # 只设路径，不等提示符
-        # self.proc.stdin.write('.symfix\n')
-        # self.proc.stdin.flush()
-        # time.sleep(2)  # 给 2 秒生效
-        # # 直接返回，不等 kd>
-        # 只设本地缓存，不等提示符
-        self.proc.stdin.write(f'.sympath cache*{SYMBOL_DIR}\n')
+        self.proc.stdin.write(f'.sympath {SYMPATH}\n')
         self.proc.stdin.flush()
-        time.sleep(2)        # 给 2 秒生效
-        # 不再发 .reload /f，让 !analyze -v 自己按需拉符号
+        time.sleep(2)
 
-# ---------- 全局会话 ----------
 SESSION = None
 
-# ---------- MCP 工具 ----------
 @mcp.tool()
 def init_dump_session(dump_path: str):
     global SESSION
