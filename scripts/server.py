@@ -11,8 +11,6 @@ mcp = FastMCP("WinDbg MCP Server")
 CDB_PATH = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
 # 国内镜像符号服务器
 SYMPATH = rf'srv*{os.path.join(os.path.dirname(__file__), "symcache")}*https://mirrors.tuna.tsinghua.edu.cn/windows/msdl/download/symbols'
-# 若国内镜像可用，可替换为：
-# SYMPATH = r'srv*https://mirrors.tuna.tsinghua.edu.cn/windows/msdl/download/symbols'
 
 class CdbSession:
     def _read_output(self):
