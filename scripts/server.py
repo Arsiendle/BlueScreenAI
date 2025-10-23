@@ -22,25 +22,29 @@ class CdbSession:
         self.proc.stdin.write(cmd + '\n')
         self.proc.stdin.flush()
 
-        lines, start = [], time.time()
+        lines, start, kd_seen, last_read = [], time.time(), False, time.time()
         while True:
             try:
                 line = self.output_queue.get(timeout=1.0)
                 lines.append(line)
                 print(f"    LINE: {line.rstrip()!r}")
+                last_read = time.time()
 
-                # 核心：一旦出现“任意提示符”就停
-                if re.search(r'^\d+:\s*kd>', line.strip()):
-                    break
+                # 见到第一个 kd> 才标记
+                if re.match(r'^\d+\s*:\s*kd>\s*$', line.strip()):
+                    kd_seen = True
 
-                if time.time() - start > timeout:
-                    lines.append('[Timeout]\n')
-                    break
             except Empty:
-                # 1 秒没数据也继续，但总时长超 timeout 就 break
+                # 1. 见过 kd> 后 1 秒静默 → 正常结束，不标 Timeout
+                if kd_seen and time.time() - last_read > 1.0:
+                    break
+                # 2. 真正超时 → 标 Timeout
                 if time.time() - start > timeout:
                     lines.append('[Timeout]\n')
                     break
+                # ✅ 正常结束（静默）→ 不追加 Timeout
+                break
+                # 3. 否则继续等
 
         raw = ''.join(lines)
         print(f"<-- RECV: {raw!r}")
