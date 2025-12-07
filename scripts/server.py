@@ -10,7 +10,7 @@ import os
 mcp = FastMCP("WinDbg MCP Server")
 CDB_PATH = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
 # 国内镜像符号服务器
-SYMPATH = rf'srv*{os.path.join(os.path.dirname(__file__), "symcache")}*https://mirrors.tuna.tsinghua.edu.cn/windows/msdl/download/symbols'
+SYMPATH = rf'srv*{os.path.join(os.path.dirname(__file__), "symcache")}*https://mirrors.cloud.tencent.com/windows/msdl/download/symbols'
 
 class CdbSession:
     def _read_output(self):
@@ -18,36 +18,36 @@ class CdbSession:
             self.output_queue.put(line)
 
     def send_command(self, cmd: str, timeout: float = 30.0) -> str:
+        import time
+        # .reload 需要特殊长超时
+        actual_timeout = 180.0 if cmd.strip().startswith('.reload') else timeout
+        
+        sync_marker = f"__SYNC_{int(time.time()*1000)}__"
+        full_cmd = f"{cmd}\n.echo {sync_marker}\n"
+        
         print(f"--> SEND: {cmd!r}")
-        self.proc.stdin.write(cmd + '\n')
+        if cmd.startswith('lmv'):
+            print(f"=== DEBUG: 正在查询驱动模块: {cmd}")
+        self.proc.stdin.write(full_cmd)
         self.proc.stdin.flush()
-
-        lines, start, kd_seen, last_read = [], time.time(), False, time.time()
-        while True:
+        
+        lines = []
+        start_time = time.time()
+        
+        while time.time() - start_time < actual_timeout:
             try:
-                line = self.output_queue.get(timeout=1.0)
+                line = self.output_queue.get(timeout=0.5)
+                if sync_marker in line:
+                    raw = ''.join(lines)
+                    print(f"<-- RECV: {len(raw)} bytes")
+                    return raw
                 lines.append(line)
-                print(f"    LINE: {line.rstrip()!r}")
-                last_read = time.time()
-
-                # 见到第一个 kd> 才标记
-                if re.match(r'^\d+\s*:\s*kd>\s*$', line.strip()):
-                    kd_seen = True
-
             except Empty:
-                # 1. 见过 kd> 后 1 秒静默 → 正常结束，不标 Timeout
-                if kd_seen and time.time() - last_read > 1.0:
-                    break
-                # 2. 真正超时 → 标 Timeout
-                if time.time() - start > timeout:
-                    lines.append('[Timeout]\n')
-                    break
-                # ✅ 正常结束（静默）→ 不追加 Timeout
-                break
-                # 3. 否则继续等
-
+                continue
+        
+        # 超时处理
         raw = ''.join(lines)
-        print(f"<-- RECV: {raw!r}")
+        print(f"<-- TIMEOUT after {actual_timeout}s: {len(raw)} bytes")
         return raw
 
     def shutdown(self):

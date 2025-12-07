@@ -2,7 +2,7 @@
 from config import API_KEY, BASE_URL, MODEL
 from openai import OpenAI
 from openai.types.chat import ChatCompletionToolMessageParam
-import json, re, hashlib
+import json, re, hashlib, time
 from typing import Any
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
@@ -17,6 +17,7 @@ MAX_NO_NEW_INFO = 3          # 连续3轮无新信息就兜底
 
 # ---------- 1. 重型命令池 ----------
 HEAVY_CMDS = {".bugreport", "!devnode", "!drvobj", "!poaction", "!vm"}
+DRIVER_CMDS = {"lmv", "!devnode", "!drvobj", "!irpfind"}
 
 # ---------- 2. 称重函数 ----------
 def _dump_level(session: Any) -> str:
@@ -44,8 +45,18 @@ def _send_command_dedup(session: Any, cmd: str) -> str:
     if session._dump_level == "triage" and key in HEAVY_CMDS:
         return f"[当前为内核小转储，命令 '{cmd}' 不可用]"
 
-    timeout = 120.0 if key == ".reload" else 30.0
+    timeout = 240.0 if key == ".reload" else 30.0
     raw = session.send_command(cmd, timeout=timeout)
+    
+    # 自动提取栈中的第三方驱动并查询详情
+    if key in {"k", "kv", "kb"}:
+        modules = re.findall(r'[a-f0-9`]{16}\s+([a-zA-Z0-9_]+)!', raw)
+        print(f"=== DEBUG: 从栈中提取的模块: {modules}")
+        for mod in set(modules) - {"nt"}:  # 只查非系统驱动
+            lmv_cmd = f"lmv m {mod}"
+            lmv_output = session.send_command(lmv_cmd)
+            raw += f"\n[驱动信息] {lmv_cmd}\n{lmv_output}\n"
+    
     return _collapse_stack(raw)
 
 # ---------- 5. 主循环 ----------
@@ -66,9 +77,12 @@ def ai_sampling_loop_with_session(session: Any) -> str:
     init_output = session.send_command("!analyze -v", timeout=60.0)
     init_output = _collapse_stack(init_output)
 
+    # 定位 ai_agent.py 的 ai_sampling_loop_with_session 函数中以下代码块
     if "WRONG_SYMBOLS" in init_output:
-        session.send_command(".symfix", timeout=30.0)
-        session.send_command(".reload", timeout=120.0)
+        session.send_command(".symfix")
+        # 必须增加等待时间让 .symfix 生效
+        time.sleep(2.0)
+        session.send_command(".reload", timeout=240.0)
         init_output = session.send_command("!analyze -v", timeout=60.0)
         init_output = _collapse_stack(init_output)
 
